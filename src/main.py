@@ -28,6 +28,7 @@ from core.service import (DownloadManager, Library, NeedsLogin, Site, add_course
 from core.auth import site_root as auth_root
 
 APP_NAME = 'Course Saver'
+MAX_COPY_BYTES = 150 * 1024 * 1024  # biggest file the save-a-copy button will read into memory
 QUALITY_LABELS = {
     'phone': 'Phone size (smallest)',
     'hd': 'HD 720p',
@@ -595,18 +596,36 @@ class App:
         except Exception as e:
             self.alert('Could not open the file', str(e))
 
+    def saved_file(self, att):
+        """Absolute path of a downloaded attachment, or None (with a friendly message) if it is gone."""
+        path = self.lib.abs_path(att.local_file_path) if att.local_file_path else None
+        if not path or not os.path.exists(path):
+            self.alert('File not found', 'This file is no longer on this device. Go back to the course and download it again.')
+            return None
+        return path
+
     async def share_attachment(self, att):
         """Android: the system share sheet (lists PDF viewers, Drive, Gmail, ...) for this file."""
-        path = self.lib.abs_path(att.local_file_path)
+        path = self.saved_file(att)
+        if path is None:
+            return
         try:
-            await self.share.share_files([ft.ShareFile.from_path(path, mime_type=mimetypes.guess_type(path)[0])],
-                                         title=att.name)
+            # ShareFile(...) rather than ShareFile.from_path(): only the constructor accepts a mime type,
+            # which helps Android offer the right apps (PDF viewer, music player, ...).
+            shared = ft.ShareFile(path=path, name=os.path.basename(path), mime_type=mimetypes.guess_type(path)[0])
+            await self.share.share_files([shared], title=att.name or os.path.basename(path))
         except Exception as e:
             self.alert('Could not open the file', str(e))
 
     async def save_attachment_copy(self, att):
         """Android: let the user pick where to save a copy (Downloads, Drive, ...)."""
-        path = self.lib.abs_path(att.local_file_path)
+        path = self.saved_file(att)
+        if path is None:
+            return
+        if os.path.getsize(path) > MAX_COPY_BYTES:  # the save dialog needs the whole file in memory
+            self.alert('File is too large to copy here',
+                       f'Use the share button instead and choose "Save to Files" or Drive. ({human_size(os.path.getsize(path))})')
+            return
         try:
             with open(path, 'rb') as f:
                 data = f.read()
