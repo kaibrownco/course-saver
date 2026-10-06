@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "course-saver"
+version = "0.2.0"
+description = "Save the Kajabi courses you own so you can watch them offline"
+requires-python = ">=3.9"
+# Also the dependency list `flet build` bundles into the Windows/Android app, so keep it to what the app needs.
+dependencies = [
+  "requests>=2.0",
+  "beautifulsoup4>=4.0",
+  "jsonpickle>=2.0",
+  "flet==1.0.3",
+  "flet-video==1.0.3",
+]
+
+[project.optional-dependencies]
+cli = ["click>=8.0", "Jinja2>=3.1.6"]   # command-line tool + static-site export
+dev = ["pytest>=8.3.5", "flet-cli==1.0.3", "flet-desktop==1.0.3", "click>=8.0", "Jinja2>=3.1.6"]
+
+[project.scripts]
+kajabi-scrape = "cli.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sitegen = ["templates/*.jinja", "static/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+
+[tool.flet]
+product = "Course Saver"
+description = "Save the Kajabi courses you own so you can watch them offline."
+org = "co.kaibrown"
+company = "Kai Brown"
+copyright = "Copyright (C) 2026 Kai Brown"
+
+[tool.flet.app]
+path = "src"
+module = "main"
+exclude = ["cli", "sitegen", "kajabi_scraper.egg-info"]
+
+[tool.flet.android]
+permissions = ["INTERNET"]
+
+[tool.flet.windows]
+permissions = ["INTERNET"]

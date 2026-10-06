@@ -1,0 +1,19 @@
+{% extends "header.jinja" %}
+{% block title %}{{ category.name }} · {{ product.display_title }}{% endblock %}
+{% block crumbs %}<nav class="crumbs"><a href="../../index.html">Courses</a> / <a href="../index.html">{{ product.display_title }}</a></nav>{% endblock %}
+{% block content %}
+<h1>{{ category.name }}</h1>
+<ol class="lessons">
+  {% for post in category.posts %}
+  <li>
+    <a href="{{ post.pk }}/index.html">{{ post.name }}</a>
+    <span class="badges">
+      {% if post.video_path %}<span class="badge">video</span>{% endif %}
+      {% if post.attachments %}<span class="badge">{{ post.attachments | length }} file{{ '' if post.attachments | length == 1 else 's' }}</span>{% endif %}
+    </span>
+  </li>
+  {% else %}
+  <li class="empty">No lessons in this section.</li>
+  {% endfor %}
+</ol>
+{% endblock %}

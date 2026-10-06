@@ -1,0 +1,14 @@
+{% extends "header.jinja" %}
+{% block title %}{{ product.display_title }}{% endblock %}
+{% block crumbs %}<nav class="crumbs"><a href="../index.html">Courses</a></nav>{% endblock %}
+{% block content %}
+<h1>{{ product.display_title }}</h1>
+<div class="grid">
+  {% for category in product.categories %}
+  <a class="card" href="{{ category.pk }}/index.html">
+    <span class="card-title">{{ category.name }}</span>
+    <span class="meta">{{ category.posts | length }} lesson{{ '' if category.posts | length == 1 else 's' }}</span>
+  </a>
+  {% endfor %}
+</div>
+{% endblock %}

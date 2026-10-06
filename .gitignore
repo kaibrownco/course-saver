@@ -1,0 +1,18 @@
+# credentials / session cookies — never commit
+cookies*.json
+cookies/
+
+# scraped data and downloaded media
+library/
+output/
+
+# python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# flet build output
+build/
+dist/
+.DS_Store

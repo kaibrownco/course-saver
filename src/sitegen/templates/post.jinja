@@ -1,0 +1,37 @@
+{% extends "header.jinja" %}
+{% block title %}{{ post.name }} · {{ product.display_title }}{% endblock %}
+{% block crumbs %}
+<nav class="crumbs"><a href="../../../index.html">Courses</a> / <a href="../../index.html">{{ product.display_title }}</a> / <a href="../index.html">{{ category.name }}</a></nav>
+{% endblock %}
+{% block content %}
+<h1>{{ post.name }}</h1>
+{% if post.video_path %}
+  <video class="player" controls preload="metadata" src="{{ media(post.video_path) }}"></video>
+{% elif post.wistia_assets %}
+  <p class="notice">Video not downloaded yet. Run <code>kajabi-scrape download-videos</code>.</p>
+{% endif %}
+
+<div class="cols">
+  <article>
+    {% for para in (post.content or '').split('\n\n') if para.strip() %}<p>{{ para }}</p>{% endfor %}
+  </article>
+  {% if post.attachments %}
+  <aside class="files">
+    <h2>Attachments</h2>
+    <ul>
+      {% for a in post.attachments %}
+      <li>
+        {% if a.local_file_path %}<a href="{{ media(a.local_file_path) }}">{{ a.name or a.local_file_path.split('/')[-1] }}</a>
+        {% else %}<span class="muted">{{ a.name }} (not downloaded)</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </aside>
+  {% endif %}
+</div>
+
+<nav class="pager">
+  {% if prev %}<a href="../../{{ prev[0].pk }}/{{ prev[1].pk }}/index.html">← {{ prev[1].name }}</a>{% else %}<span></span>{% endif %}
+  {% if next %}<a href="../../{{ next[0].pk }}/{{ next[1].pk }}/index.html">{{ next[1].name }} →</a>{% endif %}
+</nav>
+{% endblock %}

@@ -1,0 +1,122 @@
+name: Build apps
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which app to build
+        type: choice
+        options: [all, android, windows]
+        default: all
+
+# Tests run on every push and pull request. The (slow) app builds only run when asked:
+#   - the commit message / PR title contains [build]
+#   - a tag starting with v is pushed (this also publishes a GitHub Release)
+#   - "Run workflow" is clicked, or `gh workflow run build.yml`
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # never cancel a running build because of a later push
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          build=false
+          [ "$EVENT" = "workflow_dispatch" ] && build=true
+          [[ "$REF" == refs/tags/v* ]] && build=true
+          [[ "$COMMIT_MSG" == *"[build]"* ]] && build=true
+          [[ "$PR_TITLE" == *"[build]"* ]] && build=true
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "Build apps: $build"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}' }
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  windows:
+    needs: [test, plan]
+    if: needs.plan.outputs.build == 'true' && inputs.platform != 'android'
+    runs-on: windows-latest
+    env:
+      # flet prints unicode status marks; the default Windows console encoding (cp1252) crashes on them
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}' }
+      - run: pip install "flet-cli==1.0.3"
+      - run: flet build windows --yes --no-rich-output -v
+      - name: Zip the app
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/* -DestinationPath CourseSaver-windows.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: CourseSaver-windows, path: CourseSaver-windows.zip, retention-days: 7 }
+
+  android:
+    needs: [test, plan]
+    if: needs.plan.outputs.build == 'true' && inputs.platform != 'windows'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}' }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - run: pip install "flet-cli==1.0.3"
+      # A permanent signing key (GitHub secrets) makes every build install as an update over the previous one.
+      # Without the secrets (e.g. a fork) the build still works but is signed with a throwaway key.
+      - name: Prepare signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/upload.p12"
+            echo "FLET_ANDROID_SIGNING_KEY_STORE=$RUNNER_TEMP/upload.p12" >> "$GITHUB_ENV"
+            echo "FLET_ANDROID_SIGNING_KEY_ALIAS=upload" >> "$GITHUB_ENV"
+          else
+            echo "No signing key configured; APK will use a temporary key."
+          fi
+      - run: flet build apk --arch arm64-v8a --build-number ${{ github.run_number }} --yes --no-rich-output -v
+        env:
+          FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with: { name: CourseSaver-android, path: build/apk/*.apk, retention-days: 7 }
+      - name: Show the APK signing fingerprint (should be identical on every build)
+        continue-on-error: true
+        run: |
+          APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/ | tail -1)apksigner"
+          "$APKSIGNER" verify --print-certs build/apk/*.apk | grep -E "DN|SHA-256"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - uses: softprops/action-gh-release@v2
+        with: { files: 'dist/**/*' }

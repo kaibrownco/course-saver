@@ -1,0 +1,15 @@
+{% extends "header.jinja" %}
+{% block content %}
+<h1>Your courses</h1>
+<div class="grid">
+  {% for product in products %}
+  {% set posts = product.categories | map(attribute='posts') | sum(start=[]) %}
+  <a class="card" href="{{ product.name }}/index.html">
+    <span class="card-title">{{ product.display_title }}</span>
+    <span class="meta">{{ product.categories | length }} sections · {{ posts | length }} lessons</span>
+  </a>
+  {% else %}
+  <p class="empty">No courses yet. Run <code>kajabi-scrape sync</code> first.</p>
+  {% endfor %}
+</div>
+{% endblock %}
