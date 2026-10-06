@@ -80,6 +80,52 @@ class Library:
         if media:
             shutil.rmtree(os.path.join(self.root, 'media', safe_name(product.name)), ignore_errors=True)
 
+    # -- deleting downloads (always an explicit user action; the course outline is kept) -------------
+    def _inside_media(self, product: Product, path: str) -> bool:
+        """True only for paths under this course's media folder, so a bad/legacy path can never delete elsewhere."""
+        root = os.path.realpath(os.path.join(self.root, 'media', safe_name(product.name)))
+        real = os.path.realpath(path)
+        return real != root and os.path.commonpath([real, root]) == root
+
+    def lesson_download_bytes(self, product: Product, post) -> int:
+        """Bytes of this lesson's downloaded video/files (what deleting them would free)."""
+        total = 0
+        for rel in [post.video_path] + [a.local_file_path for a in post.attachments or []]:
+            path = self.abs_path(rel) if rel else None
+            if path and os.path.isfile(path) and self._inside_media(product, path):
+                total += os.path.getsize(path)
+        return total
+
+    def delete_lesson_downloads(self, product: Product, post) -> int:
+        """Delete one lesson's downloaded video and files from this device. Forgets their paths so the lesson
+        shows as not downloaded again; the lesson itself stays in the course. Returns bytes freed."""
+        import shutil
+        freed = self.lesson_download_bytes(product, post)
+        for rel in [post.video_path] + [a.local_file_path for a in post.attachments or []]:
+            path = self.abs_path(rel) if rel else None
+            if path and os.path.isfile(path) and self._inside_media(product, path):
+                os.remove(path)
+        lesson_dir = self.media_dir(product, post)  # also clears leftovers such as a half-finished .part file
+        if os.path.isdir(lesson_dir) and self._inside_media(product, lesson_dir):
+            shutil.rmtree(lesson_dir, ignore_errors=True)
+        post.video_path = None
+        for att in post.attachments or []:
+            att.local_file_path = None
+        self.save(product)
+        return freed
+
+    def delete_course_downloads(self, product: Product) -> int:
+        """Delete every downloaded video/file of a course but keep the course and its lessons. Returns bytes freed."""
+        import shutil
+        freed = sum(self.lesson_download_bytes(product, post) for _, post in all_posts(product))
+        shutil.rmtree(os.path.join(self.root, 'media', safe_name(product.name)), ignore_errors=True)
+        for _, post in all_posts(product):
+            post.video_path = None
+            for att in post.attachments or []:
+                att.local_file_path = None
+        self.save(product)
+        return freed
+
     def delete_site(self, site: 'Site'):
         """Explicit user action only: remove a site's courses, downloads, saved list and sign-in."""
         for prod in site.products:

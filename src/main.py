@@ -114,6 +114,17 @@ class App:
                              actions=[ft.TextButton('OK', on_click=lambda e: self.page.pop_dialog())])
         self.page.show_dialog(dlg)
 
+    def confirm(self, title: str, message: str, yes_label: str, on_yes):
+        """Ask before doing something destructive; on_yes runs only if the user confirms."""
+        def yes(e):
+            self.page.pop_dialog()
+            on_yes()
+            self.page.update()
+        self.page.show_dialog(ft.AlertDialog(
+            title=ft.Text(title), content=ft.Text(message),
+            actions=[ft.TextButton('Cancel', on_click=lambda e: self.page.pop_dialog()),
+                     ft.TextButton(yes_label, on_click=yes)]))
+
     def ui(self, fn):
         """Run fn on the UI side from a worker thread."""
         try:
@@ -387,8 +398,15 @@ class App:
                 items = []
                 for post in cat.posts:
                     ok = fully_saved(post)
-                    icon = ft.Icon(ft.Icons.CHECK_CIRCLE if ok else (ft.Icons.CLOUD_OUTLINED if downloadable(post) else ft.Icons.ARTICLE_OUTLINED),
-                                   color=ft.Colors.GREEN if ok else ft.Colors.OUTLINE, size=20)
+                    if ok and self.lib.lesson_download_bytes(prod, post) > 0:
+                        # saved on this device: tapping the green check offers to delete it
+                        icon = ft.PopupMenuButton(
+                            icon=ft.Icons.CHECK_CIRCLE, icon_color=ft.Colors.GREEN, tooltip='Saved. Tap for options',
+                            items=[ft.PopupMenuItem('Delete video and files from this device', icon=ft.Icons.DELETE_OUTLINE,
+                                                    on_click=lambda e, p=post: ask_delete_lesson(p))])
+                    else:
+                        icon = ft.Icon(ft.Icons.CHECK_CIRCLE if ok else (ft.Icons.CLOUD_OUTLINED if downloadable(post) else ft.Icons.ARTICLE_OUTLINED),
+                                       color=ft.Colors.GREEN if ok else ft.Colors.OUTLINE, size=20)
                     cb = ft.Checkbox(value=(cat.pk, post.pk) in selected, visible=downloadable(post) and not ok,
                                      on_change=lambda e, c=cat, p=post: toggle(c, p, e.control.value))
                     rows[post.pk] = (cb, icon)
@@ -476,6 +494,21 @@ class App:
 
         qdrop = ft.Dropdown(value=quality['value'], label='Video quality', on_select=on_quality, expand=True,
                             options=[ft.DropdownOption(k, v) for k, v in QUALITY_LABELS.items()])
+        def ask_delete_lesson(post):
+            size = human_size(self.lib.lesson_download_bytes(prod, post))
+            self.confirm('Delete this download?',
+                         f'This removes the saved video and files for "{post.name.strip()}" from this device ({size}). '
+                         'The lesson stays in the course and you can download it again.', 'Delete',
+                         lambda: (self.lib.delete_lesson_downloads(prod, post), refresh(),
+                                  self.toast(f'Deleted. Freed {size}.')))
+
+        def ask_delete_all(e=None):
+            size = human_size(sum(self.lib.lesson_download_bytes(prod, p) for _, p in all_posts(prod)))
+            self.confirm('Delete all downloads for this course?',
+                         f'This removes every saved video and file of "{prod.display_title}" from this device ({size}). '
+                         'The course and its lessons stay, and you can download them again.', 'Delete all',
+                         lambda: (self.lib.delete_course_downloads(prod), refresh(), self.toast(f'Deleted. Freed {size}.')))
+
         def resync(e):
             """Re-read the outline and lessons. New lessons appear; nothing already downloaded is ever removed."""
             def work(fetcher, status):
@@ -491,7 +524,9 @@ class App:
             ft.Row([ft.TextButton('Select everything new', on_click=lambda e: select('unsaved')),
                     ft.TextButton('Clear', on_click=lambda e: select('none'))], wrap=True),
             sections,
-        ], refresh=refresh, actions=[ft.IconButton(ft.Icons.REFRESH, tooltip='Check for new lessons', on_click=resync)],
+        ], refresh=refresh, actions=[ft.IconButton(ft.Icons.REFRESH, tooltip='Check for new lessons', on_click=resync),
+                     ft.PopupMenuButton(items=[ft.PopupMenuItem('Delete all downloads', icon=ft.Icons.DELETE_SWEEP_OUTLINED,
+                                                                on_click=ask_delete_all)])],
             footer=ft.Column([job_box, ft.Row([dl_btn, summary], spacing=12,
                                                               vertical_alignment=ft.CrossAxisAlignment.CENTER)], spacing=6))
 
@@ -582,7 +617,16 @@ class App:
             if self.is_mobile:
                 controls.append(ft.Text('Tap a file to open it in another app. Use the save button to put a copy in a '
                                         'folder you choose (for example Downloads).', size=12, color=ft.Colors.OUTLINE))
-        return self.view(post.name.strip(), controls)
+        actions = []
+        if self.lib.lesson_download_bytes(prod, post) > 0:
+            def ask_delete(e):
+                size = human_size(self.lib.lesson_download_bytes(prod, post))
+                self.confirm('Delete this download?',
+                             f'This removes the saved video and files for this lesson from this device ({size}). '
+                             'The lesson stays in the course and you can download it again.', 'Delete',
+                             lambda: (self.lib.delete_lesson_downloads(prod, post), self.pop(), self.toast(f'Deleted. Freed {size}.')))
+            actions.append(ft.IconButton(ft.Icons.DELETE_OUTLINE, tooltip='Delete this download', on_click=ask_delete))
+        return self.view(post.name.strip(), controls, actions=actions)
 
     def attachment_click(self, att):
         """Tapping a saved file: share sheet on phones, the default app on desktop."""

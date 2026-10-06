@@ -149,7 +149,9 @@ def lesson(lib, downloaded_attachment=True, with_video=True):
 
 
 def tooltips(view):
-    return {c.tooltip for c in walk(view) if isinstance(c, ft.IconButton) and c.tooltip}
+    """Tooltips of every icon button on a screen, including the ones in its top bar."""
+    controls = walk(view) + list(view.appbar.actions if view.appbar else [])
+    return {c.tooltip for c in controls if isinstance(c, ft.IconButton) and c.tooltip}
 
 
 def test_mobile_lesson_shows_share_and_save_buttons_and_streams_unsaved_video(tmp_path):
@@ -173,3 +175,45 @@ def test_lesson_with_nothing_downloaded_still_builds(tmp_path):
     app, page, lib = make_app(tmp_path)
     lesson(lib, downloaded_attachment=False, with_video=False)
     assert app.lesson_view('p', '1', '10') is not None
+
+
+def find(view, pred):
+    return [c for c in walk(view) if pred(c)]
+
+
+def test_lesson_screen_has_a_delete_button_only_when_something_is_downloaded(tmp_path):
+    app, page, lib = make_app(tmp_path)
+    lesson(lib, downloaded_attachment=True, with_video=False)
+    assert 'Delete this download' in tooltips(app.lesson_view('p', '1', '10'))
+    lesson(lib, downloaded_attachment=False, with_video=False)
+    assert 'Delete this download' not in tooltips(app.lesson_view('p', '1', '10'))
+
+
+def test_deleting_from_the_lesson_screen_asks_first_then_deletes(tmp_path):
+    import os
+    app, page, lib = make_app(tmp_path)
+    lesson(lib, downloaded_attachment=True, with_video=False)
+    page.views.append(SimpleNamespace(data=None))            # a screen to go back to
+    view = app.lesson_view('p', '1', '10')
+    trash = next(c for c in view.appbar.actions if getattr(c, 'tooltip', '') == 'Delete this download')
+    trash.on_click(None)
+    dlg = page.dialogs[-1]
+    assert 'Delete this download?' in dlg.title.value and 'stays in the course' in dlg.content.value
+    path = lib.abs_path(lib.load('p').categories[0].posts[0].attachments[0].local_file_path)
+    assert os.path.exists(path)                               # nothing deleted yet
+    dlg.actions[0].on_click(None)                             # Cancel
+    assert os.path.exists(path)
+    trash.on_click(None)
+    page.dialogs[-1].actions[1].on_click(None)                # confirm
+    assert not os.path.exists(path)
+    assert lib.load('p').categories[0].posts[0].attachments[0].local_file_path is None
+
+
+def test_course_screen_offers_delete_for_saved_lessons_and_for_everything(tmp_path):
+    app, page, lib = make_app(tmp_path)
+    lesson(lib, downloaded_attachment=True, with_video=False)
+    view = app.course_view('p')
+    menus = find(view, lambda c: isinstance(c, ft.PopupMenuButton) and c.tooltip == 'Saved. Tap for options')
+    assert len(menus) == 1                                    # the saved lesson shows a tappable check
+    top_menu = next(a for a in view.appbar.actions if isinstance(a, ft.PopupMenuButton))
+    assert top_menu.items[0].content == 'Delete all downloads'
