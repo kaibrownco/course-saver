@@ -27,6 +27,14 @@ On Android they live inside the app's storage and play in the app; removing the 
 Sign-in only works for sites that use an email and password. Courses that use Google/Facebook sign-in or
 emailed magic links aren't supported yet.
 
+## Troubleshooting
+
+- **"Please sign in again"** — the saved sign-in expired. Enter the password; nothing you downloaded is affected.
+  The same thing is achieved by tapping **+** and signing in to the same website again.
+- **"The website is showing a security check and blocked the app"** — the site's bot protection (Cloudflare) refused the
+  app's request. Wait a few minutes and retry; if it persists, switch between Wi-Fi and mobile data. Adding a whole
+  course reads one page per lesson, which can trigger this; the app paces itself, but a retry later usually works.
+
 ## Getting the apps
 
 Builds come from GitHub Actions (`.github/workflows/build.yml`) so no Windows machine or Android tooling is needed.

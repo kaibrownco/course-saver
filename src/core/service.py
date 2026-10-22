@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import threading
+import time
 import warnings
 from urllib.parse import urlparse
 
@@ -18,7 +20,7 @@ import jsonpickle
 
 from . import auth
 from .downloader import Downloader, Cancelled, safe_name, video_size
-from .fetcher import Fetcher, SessionExpired
+from .fetcher import Fetcher, SessionExpired, SiteBlocked
 from .models import Category, Product
 from .parser import Parser
 from .wistia_client import WistiaClient
@@ -246,10 +248,11 @@ def add_course(lib: 'Library', fetcher: Fetcher, url: str, title: str | None = N
     existing = lib.load(name) if os.path.exists(lib.product_path(name)) else None
     if on_status:
         on_status('Reading the course outline…')
-    prod = scrape_tree(fetcher, url, name, title or (existing.title if existing else None), existing)
+    polite = lambda: time.sleep(random.uniform(0.15, 0.5))  # looks less like a bot, so security checks trigger less
+    prod = scrape_tree(fetcher, url, name, title or (existing.title if existing else None), existing, pause=polite)
     prod.email = email or prod.email
     lib.save(prod)
-    scrape_posts(fetcher, prod, lib.save, cancel=cancel,
+    scrape_posts(fetcher, prod, lib.save, cancel=cancel, pause=polite,
                  on_progress=(lambda n, total, nm: on_status(f'Reading lesson {n} of {total}…')) if on_status else None)
     return prod
 
@@ -358,8 +361,7 @@ def download_post(lib: Library, product: Product, cat, post, fetcher: Fetcher, q
             continue
         if cancel is not None and cancel.is_set():
             raise Cancelled()
-        resp = fetcher.get(att.url, stream=True)
-        resp.raise_for_status()
+        resp = fetcher.get_file(att.url)
         att.local_file_path = lib.rel(Downloader.download_file(resp, dest, filename=att.name, cancel=cancel))
         lib.save(product)
     if post.wistia_assets:

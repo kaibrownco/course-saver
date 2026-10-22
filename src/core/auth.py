@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from .fetcher import DEFAULT_UA
+from .fetcher import BLOCKED_MESSAGE, DEFAULT_UA, is_challenge
 
 
 class LoginError(Exception):
@@ -35,6 +35,8 @@ def login(site_url: str, email: str, password: str, timeout: int = 30) -> list[d
     s.headers.update({'User-Agent': DEFAULT_UA, 'Accept-Language': 'en-US,en;q=0.9'})
     try:
         page = s.get(login_url, timeout=timeout)
+        if is_challenge(page):
+            raise LoginError(BLOCKED_MESSAGE)
         form = _find_login_form(page.text) if page.status_code == 200 else None
         if form is None:
             raise LoginError("Couldn't find the sign-in form on that site. It may use Google/Facebook "
@@ -58,6 +60,8 @@ def login(site_url: str, email: str, password: str, timeout: int = 30) -> list[d
     except requests.RequestException as e:
         raise LoginError(f"Couldn't reach the site. Check your internet connection. ({type(e).__name__})")
 
+    if is_challenge(resp):
+        raise LoginError(BLOCKED_MESSAGE)
     if resp.status_code >= 400 or '/login' in urlparse(resp.url).path or _find_login_form(resp.text):
         raise LoginError('Sign-in failed. Please check your email and password.')
     return [{'name': c.name, 'value': c.value, 'domain': c.domain, 'path': c.path or '/'} for c in s.cookies]

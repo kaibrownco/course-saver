@@ -22,7 +22,7 @@ except Exception:  # video control missing: lessons fall back to the system play
 
 from core.auth import LoginError
 from core.downloader import pick_video
-from core.fetcher import SessionExpired
+from core.fetcher import SessionExpired, SiteBlocked
 from core.service import (DownloadManager, Library, NeedsLogin, Site, add_course, all_posts, discover_courses,
                           host_of, lesson_bytes, slug_from_url)
 from core.auth import site_root as auth_root
@@ -347,6 +347,10 @@ class App:
             except (NeedsLogin, SessionExpired):
                 self.page.pop_dialog()
                 self.reauth(site_url, label, email, lambda: self.busy(title, work, on_done, site_url, label, email))
+                return
+            except SiteBlocked as e:
+                self.page.pop_dialog()
+                self.alert('The website blocked the request', str(e))
                 return
             except Exception as e:
                 self.page.pop_dialog()
