@@ -51,3 +51,12 @@ permissions = ["INTERNET"]
 
 [tool.flet.windows]
 permissions = ["INTERNET"]
+
+# Flet's Android template forces the Flutter package `jni` to 1.0.0, but newer releases of some Flutter plugins need
+# jni 1.1+ and then fail to compile ("generated bindings expect package:jni ^1.1.0"). That happened on 2026-10-22
+# when shared_preferences_android 2.5.x shipped. Pin these plugins to versions known to work with jni 1.0.0 so a
+# plugin release can't break a build overnight. Bump together with flet/flet-video when upgrading Flet.
+[tool.flet.flutter.pubspec.dependency_overrides]
+shared_preferences_android = "2.4.28"
+path_provider_android = "2.3.1"
+url_launcher_android = "6.3.33"
