@@ -15,7 +15,7 @@ from core.auth import LoginError, login
 from core.fetcher import SessionExpired, SiteBlocked, Fetcher
 from core.models import Attachment, Category, Post, Product
 from core.service import Library, NeedsLogin, download_post
-from test_app_android import make_app, StubPage  # noqa: F401  (stub page + app factory)
+from test_app_android import dialog_text, has_message, inline_controls, make_app, press, StubPage  # noqa: F401
 
 CHALLENGE = ('cf-mitigated', 'challenge')
 
@@ -156,15 +156,15 @@ def test_app_asks_for_the_password_when_the_session_expired(tmp_path, monkeypatc
 
     monkeypatch.setattr(lib, 'fetcher_for', lambda url: object())
     app.busy('Refreshing', work, done.append, 'https://x.example', 'Example', 'me@x.com')
-    assert page.dialogs[-1].title.value == 'Please sign in again'   # the dialog she never saw
-    assert 'me@x.com' in page.dialogs[-1].content.controls[0].value and not done
+    assert 'Please sign in again' in dialog_text(page)    # the prompt she never saw
+    assert 'me@x.com' in dialog_text(page) and not done and not page.dialogs
 
 
 def test_app_asks_for_the_password_when_there_is_no_saved_session(tmp_path, monkeypatch):
     app, page, lib = make_app(tmp_path)
     monkeypatch.setattr(app_module.threading, 'Thread', InlineThread)
     app.busy('Refreshing', lambda f, s: 1, lambda r: None, 'https://x.example', 'Example', None)  # no session file
-    assert page.dialogs[-1].title.value == 'Please sign in again'
+    assert 'Please sign in again' in dialog_text(page)
 
 
 def test_app_explains_a_security_check_instead_of_a_raw_error(tmp_path, monkeypatch):
@@ -176,16 +176,68 @@ def test_app_explains_a_security_check_instead_of_a_raw_error(tmp_path, monkeypa
         raise SiteBlocked('The website is showing a security check and blocked the app.')
 
     app.busy('Adding', work, lambda r: None, 'https://x.example', 'Example', None)
-    dlg = page.dialogs[-1]
-    assert dlg.title.value == 'The website blocked the request' and 'security check' in dlg.content.value
+    assert 'The website blocked the request' in dialog_text(page) and 'security check' in dialog_text(page)
 
 
 def test_reauth_shows_the_security_check_message_if_sign_in_is_blocked(tmp_path, monkeypatch):
     app, page, lib = make_app(tmp_path)
     monkeypatch.setattr(lib, 'sign_in', lambda *a: (_ for _ in ()).throw(LoginError('security check, wait a few minutes')))
     app.reauth('https://x.example', 'Example', 'me@x.com', lambda: None)
-    dlg = page.dialogs[-1]
-    ok = next(a for a in dlg.actions if a.content == 'Sign in')
-    ok.on_click(None)
-    err = dlg.content.controls[-1]
-    assert 'security check' in err.value        # shown in the dialog so she knows why, and can try again
+    press(page, 'Sign in')
+    assert 'security check' in dialog_text(page)      # shown on the card so she knows why, and can try again
+    assert 'Please sign in again' in dialog_text(page)
+
+
+def test_a_successful_sign_in_again_closes_the_card_and_continues(tmp_path, monkeypatch):
+    app, page, lib = make_app(tmp_path)
+    monkeypatch.setattr(lib, 'sign_in', lambda *a: object())
+    after = []
+    app.reauth('https://x.example', 'Example', 'me@x.com', lambda: after.append('continued'))
+    press(page, 'Sign in')
+    assert after == ['continued'] and not has_message(page)
+
+
+def test_the_app_never_uses_pop_up_dialogs_for_its_own_messages():
+    """Regression: a closed dialog came back from the dead (blocking everything) when the user navigated back after a
+    screen change. Alerts, confirmations, progress and sign-in prompts are inline cards; only toasts remain."""
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'src', 'main.py'), encoding='utf-8').read()
+    assert 'AlertDialog' not in src and 'pop_dialog' not in src and 'close_dialog' not in src
+
+
+def test_progress_card_is_gone_before_the_next_screen_opens(tmp_path, monkeypatch):
+    app, page, lib = make_app(tmp_path)
+    monkeypatch.setattr(app_module.threading, 'Thread', InlineThread)
+    monkeypatch.setattr(lib, 'fetcher_for', lambda url: object())
+    seen = {}
+
+    def on_done(result):                        # this is where the course screen gets pushed in the real app
+        seen['message_still_showing'] = has_message(page)
+        seen['body_enabled'] = not page.app.slots[id(page.views[-1])][1].disabled
+
+    app.busy('Adding Course', lambda f, s: 'ok', on_done, 'https://x.example', 'Example', None)
+    assert seen == {'message_still_showing': False, 'body_enabled': True}
+    assert page.dialogs == []                   # and no pop-up dialog was ever involved
+
+
+def test_progress_card_blocks_the_list_while_working_and_shows_status(tmp_path, monkeypatch):
+    app, page, lib = make_app(tmp_path)
+    monkeypatch.setattr(lib, 'fetcher_for', lambda url: object())
+    started = threading.Event()
+    release = threading.Event()
+
+    def work(fetcher_, status):
+        status('Reading lesson 3 of 9…')
+        started.set()
+        release.wait(5)
+        return 'done'
+
+    app.busy('Adding Course', work, lambda r: None, 'https://x.example', 'Example', None)
+    assert started.wait(5)
+    assert 'Adding Course' in dialog_text(page) and 'Reading lesson 3 of 9' in dialog_text(page)
+    assert page.app.slots[id(page.views[-1])][1].disabled is True   # list can't be tapped meanwhile
+    release.set()
+    for _ in range(100):
+        if not has_message(page):
+            break
+        threading.Event().wait(0.05)
+    assert not has_message(page) and page.app.slots[id(page.views[-1])][1].disabled is False

@@ -5,6 +5,7 @@ All the real work lives in core.service; this file is only UI.
 """
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import os
 import re
@@ -28,12 +29,19 @@ from core.service import (DownloadManager, Library, NeedsLogin, Site, add_course
 from core.auth import site_root as auth_root
 
 APP_NAME = 'Course Saver'
+SPEEDS = (0.75, 1.0, 1.25, 1.5, 1.75, 2.0)   # playback speeds offered on every platform
+SEEK_SECONDS = 5                              # left/right arrow keys skip this far in the lesson video
+MAX_CONTENT_WIDTH = 900                       # wide windows keep content this wide and centered; phones use the full width
 MAX_COPY_BYTES = 150 * 1024 * 1024  # biggest file the save-a-copy button will read into memory
 QUALITY_LABELS = {
     'phone': 'Phone size (smallest)',
     'hd': 'HD 720p',
     'original': 'Original (largest)',
 }
+
+
+def speed_label(rate: float) -> str:
+    return f'{rate:g}×'
 
 
 def human_size(n: float) -> str:
@@ -73,7 +81,13 @@ class App:
         self.lib = lib
         self.is_mobile = page.platform in (ft.PagePlatform.ANDROID, ft.PagePlatform.IOS)
         self.default_quality = 'phone' if self.is_mobile else 'hd'
+        saved_rate = lib.get_setting('playback_rate', 1.0)
+        self.playback_rate = saved_rate if saved_rate in SPEEDS else 1.0
         self.manager: DownloadManager | None = None  # one active download job at a time
+        self.slots = {}  # id(view) -> (status slot, scrolling body): where inline messages for that screen appear
+        self.active_video = None  # the video on the lesson screen that is open (the arrow keys seek this one)
+        self.video_pos_ms = None  # its position as of the last poll (before any key press is applied)
+        self.seek_to_ms, self.seek_at = None, 0.0   # where our last arrow-key skip went, and when (chained presses)
         # Services for handing files to other apps on Android (share sheet) / saving them to a chosen folder
         self.share = ft.Share()
         self.picker = ft.FilePicker()
@@ -86,14 +100,39 @@ class App:
 
     def pop(self, *_):
         if len(self.page.views) > 1:
-            self.page.views.pop()
+            gone = self.page.views.pop()
+            self.slots.pop(id(gone), None)
+            self.active_video = None   # leaving the lesson screen (the only screen with a video)
+            self.video_pos_ms = self.seek_to_ms = None
             top = self.page.views[-1]
             if callable(top.data):
                 top.data()  # let the screen refresh itself
             self.page.update()
 
+    def gutter(self) -> float:
+        """Side margin of the page content: 16 on phones; on wide windows the content stays MAX_CONTENT_WIDTH
+        wide and centered instead of stretching (or hugging the left edge)."""
+        width = getattr(self.page, 'width', None) or 0
+        return max(16, (width - MAX_CONTENT_WIDTH) / 2) if width else 16
+
+    def narrow(self, cap: float) -> float:
+        """A width of at most `cap` that still fits inside the page margins."""
+        width = getattr(self.page, 'width', None) or 0
+        return min(cap, max(240, width - 2 * self.gutter())) if width else cap
+
+    def on_resize(self, e=None):
+        pad = ft.Padding.symmetric(horizontal=self.gutter(), vertical=8)
+        for v in self.page.views:
+            try:
+                v.controls[0].content.padding = pad   # SafeArea -> the padded body container
+            except Exception:
+                pass
+        self.page.update()
+
     def view(self, title, controls, actions=None, fab=None, back=True, refresh=None, footer=None):
-        return ft.View(
+        slot = ft.Column(spacing=0)   # inline messages (progress, confirmations, errors) appear here, above the list
+        body = ft.Column(controls, spacing=12, scroll=ft.ScrollMode.AUTO, expand=True)
+        v = ft.View(
             route=f'/{title}',
             appbar=ft.AppBar(
                 title=ft.Text(title, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
@@ -101,29 +140,54 @@ class App:
                 actions=actions or [], center_title=False,
             ),
             controls=[ft.SafeArea(content=ft.Container(ft.Column(
-                [ft.Column(controls, spacing=12, scroll=ft.ScrollMode.AUTO, expand=True)] + ([footer] if footer else []),
-                spacing=8), padding=ft.Padding.symmetric(horizontal=16, vertical=8), expand=True), expand=True)],
+                [slot, body] + ([footer] if footer else []),
+                spacing=8), padding=ft.Padding.symmetric(horizontal=self.gutter(), vertical=8), expand=True), expand=True)],
             floating_action_button=fab, data=refresh, padding=0,
         )
+        self.slots[id(v)] = (slot, body)
+        return v
 
     def toast(self, message: str):
         self.page.show_dialog(ft.SnackBar(ft.Text(message)))
 
+    def inline(self, controls, modal: bool = False):
+        """Show a card at the top of the current screen (pinned above the scrolling list) and return a function that
+        removes it. The app's own messages use this instead of pop-up dialogs: Flet keeps a closed dialog around until
+        the window reports it dismissed, and if the screen changed while it was closing, the dialog came back from
+        the dead and blocked everything once the user went back. Plain controls have no such lifecycle."""
+        entry = self.slots.get(id(self.page.views[-1])) if self.page.views else None
+        if entry is None:
+            return lambda: None
+        slot, body = entry
+        card = ft.Card(ft.Container(ft.Column(controls, spacing=8, tight=True), padding=14))
+        slot.controls = [card]
+        body.disabled = modal      # while a job runs or a question is open, ignore taps on the list
+        self.page.update()
+
+        def close():
+            if slot.controls and slot.controls[0] is card:   # don't remove a newer message
+                slot.controls = []
+                body.disabled = False
+                self.page.update()
+        return close
+
     def alert(self, title: str, message: str):
-        dlg = ft.AlertDialog(title=ft.Text(title), content=ft.Text(message),
-                             actions=[ft.TextButton('OK', on_click=lambda e: self.page.pop_dialog())])
-        self.page.show_dialog(dlg)
+        close = None
+        close = self.inline([ft.Text(title, size=16, weight=ft.FontWeight.W_600), ft.Text(message, selectable=True),
+                             ft.Row([ft.TextButton('OK', on_click=lambda e: close())], alignment=ft.MainAxisAlignment.END)])
 
     def confirm(self, title: str, message: str, yes_label: str, on_yes):
         """Ask before doing something destructive; on_yes runs only if the user confirms."""
+        close = None
+
         def yes(e):
-            self.page.pop_dialog()
+            close()
             on_yes()
             self.page.update()
-        self.page.show_dialog(ft.AlertDialog(
-            title=ft.Text(title), content=ft.Text(message),
-            actions=[ft.TextButton('Cancel', on_click=lambda e: self.page.pop_dialog()),
-                     ft.TextButton(yes_label, on_click=yes)]))
+
+        close = self.inline([ft.Text(title, size=16, weight=ft.FontWeight.W_600), ft.Text(message),
+                             ft.Row([ft.TextButton('Cancel', on_click=lambda e: close()), ft.TextButton(yes_label, on_click=yes)],
+                                    alignment=ft.MainAxisAlignment.END)], modal=True)
 
     def ui(self, fn):
         """Run fn on the UI side from a worker thread."""
@@ -142,13 +206,14 @@ class App:
             col.controls.clear()
             sites = self.lib.sites()
             if not sites:
-                col.controls.append(ft.Container(ft.Column([
+                col.controls.append(ft.Container(ft.Row([ft.Container(ft.Column([
                     ft.Icon(ft.Icons.SCHOOL_OUTLINED, size=64, color=ft.Colors.OUTLINE),
                     ft.Text('No courses yet', size=20, weight=ft.FontWeight.W_600),
                     ft.Text('Sign in to the website where you bought your courses and we will find them all.',
                             text_align=ft.TextAlign.CENTER, color=ft.Colors.OUTLINE),
                     ft.Button('Add a site', icon=ft.Icons.ADD, on_click=lambda e: self.push(self.add_site_view())),
-                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=12), padding=ft.Padding.only(top=60)))
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=12), width=self.narrow(380))],
+                    alignment=ft.MainAxisAlignment.CENTER), padding=ft.Padding.only(top=60)))
             for site in sites:
                 col.controls.append(self.site_card(site, refresh))
 
@@ -167,17 +232,10 @@ class App:
         saved = sum(1 for p in site.products for _, post in all_posts(p) if self.lib.has_video_file(post))
 
         def remove(e):
-            def confirm(e2):
-                self.page.pop_dialog()
-                self.lib.delete_site(site)
-                refresh()
-                self.page.update()
-            self.page.show_dialog(ft.AlertDialog(
-                title=ft.Text('Remove this site?'),
-                content=ft.Text(f'This deletes everything saved from {site.title} on this device: its '
-                                f'{len(site.products)} added course(s), their downloaded videos and files, and your sign-in.'),
-                actions=[ft.TextButton('Cancel', on_click=lambda e2: self.page.pop_dialog()),
-                         ft.TextButton('Remove', on_click=confirm)]))
+            self.confirm('Remove this site?',
+                         f'This deletes everything saved from {site.title} on this device: its '
+                         f'{len(site.products)} added course(s), their downloaded videos and files, and your sign-in.',
+                         'Remove', lambda: (self.lib.delete_site(site), refresh(), self.page.update()))
 
         return ft.Card(ft.ListTile(
             leading=ft.Icon(ft.Icons.LANGUAGE, size=34),
@@ -190,10 +248,12 @@ class App:
     # ----- Add a site -----
     def add_site_view(self) -> ft.View:
         last = next((s for s in reversed(self.lib.sites()) if s.email), None)
-        url = ft.TextField(label='Website address', hint_text='https://your-course-site.com',
+        field_width = self.narrow(480)   # comfortable on a big window, never wider than a phone screen
+        url = ft.TextField(label='Website address', hint_text='https://your-course-site.com', width=field_width,
                            keyboard_type=ft.KeyboardType.URL, autofocus=True)
-        email = ft.TextField(label='Email', value=last.email if last else '', keyboard_type=ft.KeyboardType.EMAIL)
-        password = ft.TextField(label='Password', password=True, can_reveal_password=True)
+        email = ft.TextField(label='Email', value=last.email if last else '', width=field_width,
+                             keyboard_type=ft.KeyboardType.EMAIL)
+        password = ft.TextField(label='Password', password=True, can_reveal_password=True, width=field_width)
         status = ft.Text('', color=ft.Colors.OUTLINE)
         error = ft.Text('', color=ft.Colors.ERROR, visible=False)
         ring = ft.ProgressRing(visible=False, width=22, height=22)
@@ -303,17 +363,10 @@ class App:
         saved = [p for p in with_video if self.lib.has_video_file(p)]
 
         def remove(e):
-            def confirm(e2):
-                self.page.pop_dialog()
-                self.lib.delete(prod)
-                refresh()
-                self.page.update()
-            self.page.show_dialog(ft.AlertDialog(
-                title=ft.Text('Remove this course?'),
-                content=ft.Text(f'This deletes "{prod.display_title}" and all of its downloaded videos and files from this '
-                                'device. It stays on the site and you can add it again.'),
-                actions=[ft.TextButton('Cancel', on_click=lambda e2: self.page.pop_dialog()),
-                         ft.TextButton('Remove', on_click=confirm)]))
+            self.confirm('Remove this course?',
+                         f'This deletes "{prod.display_title}" and all of its downloaded videos and files from this '
+                         'device. It stays on the site and you can add it again.',
+                         'Remove', lambda: (self.lib.delete(prod), refresh(), self.page.update()))
 
         return ft.Card(ft.ListTile(
             leading=ft.Icon(ft.Icons.PLAY_CIRCLE_OUTLINE, size=34),
@@ -333,30 +386,31 @@ class App:
 
         self.busy(f'Adding {title}', work, done, url, site.title, site.email)
 
-    # ----- helpers: a busy dialog that handles expired sign-ins -----
+    # ----- helpers: a progress card that handles expired sign-ins -----
     def busy(self, title, work, on_done, site_url, label, email):
-        """Run work(fetcher, status_fn) on a thread behind a progress dialog. Asks to sign in again if needed."""
-        status = ft.Text('Starting…')
-        self.page.show_dialog(ft.AlertDialog(modal=True, title=ft.Text(title),
-                                             content=ft.Row([ft.ProgressRing(width=22, height=22), ft.Container(status, expand=True)],
-                                                            spacing=14, tight=True)))
+        """Run work(fetcher, status_fn) on a thread behind a progress card at the top of the screen.
+        Asks to sign in again if needed; reports failures in a card."""
+        status = ft.Text('Starting…', size=13, color=ft.Colors.OUTLINE)
+        close = self.inline([ft.Row([ft.ProgressRing(width=22, height=22),
+                                     ft.Column([ft.Text(title, weight=ft.FontWeight.W_600), status], spacing=2, expand=True)],
+                                    spacing=14)], modal=True)
 
         def run():
             try:
                 result = work(self.lib.fetcher_for(site_url), lambda m: self.ui(lambda: setattr(status, 'value', m)))
             except (NeedsLogin, SessionExpired):
-                self.page.pop_dialog()
+                close()
                 self.reauth(site_url, label, email, lambda: self.busy(title, work, on_done, site_url, label, email))
                 return
             except SiteBlocked as e:
-                self.page.pop_dialog()
+                close()
                 self.alert('The website blocked the request', str(e))
                 return
             except Exception as e:
-                self.page.pop_dialog()
+                close()
                 self.alert('Something went wrong', 'This course could not be read.' if isinstance(e, ValueError) else str(e))
                 return
-            self.page.pop_dialog()
+            close()
             on_done(result)
             self.page.update()
 
@@ -535,28 +589,98 @@ class App:
                                                               vertical_alignment=ft.CrossAxisAlignment.CENTER)], spacing=6))
 
     def reauth(self, site_url, label, email, then):
-        """Session expired: ask for the password again (the email is remembered)."""
-        pw = ft.TextField(label='Password', password=True, can_reveal_password=True, autofocus=True)
-        err = ft.Text('', color=ft.Colors.ERROR)
+        """Session expired: ask for the password again (the email is remembered), in a card on the current screen."""
+        pw = ft.TextField(label='Password', password=True, can_reveal_password=True, autofocus=True,
+                          width=self.narrow(360))
+        err = ft.Text('', color=ft.Colors.ERROR, size=13)
+        close = None
 
-        def ok(e):
+        def ok(e=None):
             try:
                 self.lib.sign_in(site_url, email or '', pw.value)
             except LoginError as ex:
                 err.value = str(ex)
                 self.page.update()
                 return
-            self.page.pop_dialog()
+            close()
             then()
 
-        self.page.show_dialog(ft.AlertDialog(
-            modal=True, title=ft.Text('Please sign in again'),
-            content=ft.Column([ft.Text(f'Your sign-in for {label} has expired.' + (f'\nAccount: {email}' if email else '')),
-                               pw, err], tight=True),
-            actions=[ft.TextButton('Cancel', on_click=lambda e: self.page.pop_dialog()),
-                     ft.TextButton('Sign in', on_click=ok)]))
+        pw.on_submit = ok
+        close = self.inline([
+            ft.Text('Please sign in again', size=16, weight=ft.FontWeight.W_600),
+            ft.Text(f'Your sign-in for {label} has expired.' + (f'\nAccount: {email}' if email else '')),
+            pw, err,
+            ft.Row([ft.TextButton('Cancel', on_click=lambda e: close()), ft.TextButton('Sign in', on_click=ok)],
+                   alignment=ft.MainAxisAlignment.END)], modal=False)
 
     # ----- Lesson -----
+    async def _track_position(self, video):
+        """Keep a recent playback position for the arrow-key skip while this lesson's video is open."""
+        while self.active_video is video:
+            try:
+                self.video_pos_ms = (await video.get_current_position()).in_milliseconds
+            except Exception:
+                pass   # not loaded yet, or the window is closing
+            await asyncio.sleep(0.15)
+
+    async def on_key(self, e):
+        """Left/right arrow keys skip SEEK_SECONDS back/forward in the lesson video.
+
+        Flet's player already handles the arrow keys itself with a fixed 2-second step and cannot be switched off,
+        so the target is computed from the position just BEFORE the key press and sought to absolutely; our seek lands
+        after the player's own, so the result is exactly +/- SEEK_SECONDS instead of the two stacking."""
+        video = self.active_video
+        if video is None or e.key not in ('Arrow Left', 'Arrow Right') or e.ctrl or e.alt or e.meta or e.shift:
+            return
+        step_ms = SEEK_SECONDS * 1000 * (1 if e.key == 'Arrow Right' else -1)
+        try:
+            now = time.monotonic()
+            if self.seek_to_ms is not None and now - self.seek_at < 0.8:
+                base = self.seek_to_ms            # pressed again straight away: build on where we just sent it
+            elif self.video_pos_ms is not None:
+                base = self.video_pos_ms          # position before this key press
+            else:
+                base = (await video.get_current_position()).in_milliseconds
+            duration = (await video.get_duration()).in_milliseconds
+            target = max(0, base + step_ms)
+            if duration:
+                target = min(target, duration)
+            self.seek_to_ms, self.seek_at = int(target), now
+            await video.seek(ft.Duration(milliseconds=int(target)))
+        except Exception:
+            pass   # e.g. the video is not ready yet; skipping is a convenience, never worth an error
+
+    def player(self, source: str, on_error=None):
+        """A video that fills the page width at 16:9, plus a row of speed buttons. Returns [video row, speed row].
+        The chosen speed is remembered and applies to the next lesson too."""
+        kwargs = {'on_error': on_error} if on_error else {}
+        # Desktop (Mac/Windows): clicking the picture itself plays/pauses, like most players. Phones keep their own
+        # touch controls (material=None leaves Android/iOS at the defaults).
+        controls = fv.AdaptiveVideoControls(material_desktop=fv.MaterialDesktopVideoControls(play_and_pause_on_tap=True))
+        video = fv.Video(playlist=[fv.VideoMedia(source)], autoplay=False, aspect_ratio=16 / 9, expand=True,
+                         playback_rate=self.playback_rate, controls=controls, **kwargs)
+        self.active_video = video
+        self.video_pos_ms = self.seek_to_ms = None
+        self.page.run_task(self._track_position, video)
+        frame = ft.Container(video, aspect_ratio=16 / 9, expand=True, bgcolor=ft.Colors.BLACK,
+                             border_radius=12, clip_behavior=ft.ClipBehavior.HARD_EDGE)
+        chips = []
+
+        def pick(rate):
+            self.playback_rate = rate
+            self.lib.set_setting('playback_rate', rate)
+            video.playback_rate = rate
+            for chip in chips:
+                chip.selected = chip.data == rate
+            self.page.update()
+
+        for rate in SPEEDS:
+            chips.append(ft.Chip(label=ft.Text(speed_label(rate)), data=rate, selected=rate == self.playback_rate,
+                                 show_checkmark=False, on_select=lambda e, r=rate: pick(r)))
+        speed_row = ft.Row([ft.Text('Speed', size=13, color=ft.Colors.OUTLINE), *chips],
+                           wrap=True, spacing=6, run_spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        return [ft.Row([frame]), speed_row]
+
     def lesson_view(self, name: str, cat_pk: str, post_pk: str) -> ft.View:
         prod = self.lib.load(name)
         cat = next(c for c in prod.categories if c.pk == cat_pk)
@@ -566,12 +690,10 @@ class App:
         if self.lib.has_video_file(post):
             path = self.lib.abs_path(post.video_path)
             if fv is not None:
-                controls.append(ft.Container(fv.Video(playlist=[fv.VideoMedia(path)], autoplay=False, aspect_ratio=16 / 9,
-                                                      expand=True), height=240 if self.is_mobile else 420,
-                                             border_radius=12, clip_behavior=ft.ClipBehavior.HARD_EDGE))
+                controls.extend(self.player(path))
             if not self.is_mobile:
-                controls.append(ft.TextButton('Open in my video player', icon=ft.Icons.OPEN_IN_NEW,
-                                              on_click=lambda e: open_with_system(path)))
+                controls.append(ft.Row([ft.TextButton('Open in my video player', icon=ft.Icons.OPEN_IN_NEW,
+                                                      on_click=lambda e: open_with_system(path))]))
         elif post.wistia_assets:
             # Not saved on this device: stream it from the course's video host instead (needs internet).
             try:
@@ -579,7 +701,7 @@ class App:
             except ValueError:
                 url = None
             if url and fv is not None:
-                note = ft.Text('Streaming from the internet. Tick this lesson on the course screen to save it for offline.',
+                note = ft.Text('Streaming from the internet. Save this lesson to watch it offline.',
                                size=12, color=ft.Colors.OUTLINE)
 
                 def stream_error(e):
@@ -587,12 +709,9 @@ class App:
                     note.color = ft.Colors.ERROR
                     self.page.update()
 
-                controls.append(ft.Container(fv.Video(playlist=[fv.VideoMedia(url)], autoplay=False, aspect_ratio=16 / 9,
-                                                      expand=True, on_error=stream_error),
-                                             height=240 if self.is_mobile else 420,
-                                             border_radius=12, clip_behavior=ft.ClipBehavior.HARD_EDGE))
-                controls.append(note)
-                controls.append(ft.TextButton('Open in browser instead', icon=ft.Icons.OPEN_IN_NEW, url=url))
+                controls.extend(self.player(url, on_error=stream_error))
+                controls.append(ft.Row([note, ft.TextButton('Open in browser instead', icon=ft.Icons.OPEN_IN_NEW, url=url)],
+                                       wrap=True, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER))
             elif url:
                 controls.append(ft.Button('Watch online', icon=ft.Icons.PLAY_ARROW, url=url))
             else:
@@ -712,9 +831,12 @@ async def main(page: ft.Page):
     lib = Library(await resolve_root(page))
     app = App(page, lib)
     page.on_view_pop = app.pop
+    page.on_resize = app.on_resize
+    page.on_keyboard_event = app.on_key
     page.views.clear()
     page.views.append(app.home())
     page.update()
+    app.on_resize()  # apply the wide-window margins once the real window size is known
 
 
 if __name__ == '__main__':

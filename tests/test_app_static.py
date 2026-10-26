@@ -115,3 +115,19 @@ def test_flet_calls_match_installed_signatures():
     problems, calls, attrs = audit()
     assert calls > 100 and attrs > 100, 'audit did not look at the UI code'  # sanity: it really scanned main.py
     assert not problems, '\n' + '\n'.join(problems)
+
+
+def test_every_self_method_call_in_the_app_exists():
+    """A refactor once deleted a whole screen's method by accident; nothing noticed until it was opened. Every
+    `self.name(...)` call in main.py must point at a method (or an attribute) the App class really has."""
+    tree = ast.parse(open(SRC, encoding='utf-8').read())
+    app_cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'App')
+    methods = {n.name for n in app_cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    attrs = {t.attr for n in ast.walk(app_cls) if isinstance(n, ast.Assign) for t in n.targets
+             if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == 'self'}
+    missing = sorted({f'{n.func.attr} (line {n.lineno})' for n in ast.walk(app_cls) if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == 'self' and n.func.attr not in methods | attrs})
+    assert not missing, 'App calls methods that do not exist: ' + ', '.join(missing)
+    # and every screen the tests and navigation rely on is still there
+    assert {'home', 'add_site_view', 'site_view', 'course_view', 'lesson_view', 'busy', 'reauth', 'confirm', 'alert'} <= methods

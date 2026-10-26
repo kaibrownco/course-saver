@@ -150,6 +150,29 @@ class Library:
     def has_video_file(self, post) -> bool:
         return bool(post.video_path) and os.path.exists(self.abs_path(post.video_path))
 
+    # -- small app settings (e.g. the playback speed), stored beside the courses -----------------
+    def _settings_file(self) -> str:
+        return os.path.join(self.root, 'settings.json')
+
+    def get_setting(self, key: str, default=None):
+        try:
+            with open(self._settings_file(), encoding='utf-8') as f:
+                return json.load(f).get(key, default)
+        except (OSError, ValueError):
+            return default
+
+    def set_setting(self, key: str, value):
+        try:
+            with open(self._settings_file(), encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        data[key] = value
+        tmp = self._settings_file() + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+        os.replace(tmp, self._settings_file())
+
     # -- sites ------------------------------------------------
     def _catalog_file(self, host: str) -> str:
         return os.path.join(self.root, 'sites', safe_name(host) + '.json')

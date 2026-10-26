@@ -16,7 +16,9 @@ One app for **Windows** and **Android** (built with [Flet](https://flet.dev)), p
    - *Original* – the full upload; can be many gigabytes
 4. Tick the lessons you want (or **Select everything new**) and press **Download**. You can **Pause** at any
    time and continue later; nothing is re-downloaded.
-5. Tap a lesson to watch it, read its text, or open its files — no internet needed.
+5. Tap a lesson to watch it, read its text, or open its files — no internet needed. Under the video, pick a **speed**
+   (0.75× to 2×); it is remembered for the next lesson. On a computer, click the picture to pause/play, and use the
+   left/right arrow keys to skip 5 seconds.
 6. To free up space, tap a saved lesson's green check → **Delete video and files**, use the trash button on the lesson
    screen, or the ⋮ menu on a course → **Delete all downloads**. Each asks first; the course and its lessons stay and can be
    downloaded again.
