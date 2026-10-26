@@ -53,6 +53,11 @@ Then download `CourseSaver-windows.zip` and `CourseSaver-android` (the `.apk`) f
 
 - **Windows:** unzip, double-click `course_saver.exe`. Windows SmartScreen will warn about an unknown publisher the
   first time: click **More info → Run anyway**. (Removing the warning requires a paid code-signing certificate.)
+- **Mac (Apple Silicon):** unzip, drag **Course Saver.app** to Applications and open it. The app is not signed with an Apple
+  developer certificate, so if macOS says it can't verify the app or that it is damaged (this happens to files downloaded
+  in a browser), open **System Settings → Privacy & Security** and click **Open Anyway**, or run
+  `xattr -cr "/Applications/Course Saver.app"` once. Downloads are kept in `Documents/Course Saver`. For an Intel Mac, remove
+  `--arch arm64` from the macOS step in `.github/workflows/build.yml` to build a universal app.
 - **Android:** copy the `.apk` to the phone and open it. Builds are signed with a permanent key (stored as the GitHub secrets
   `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD`), so a newer APK installs **over** the old one and keeps its
   downloads. (Only builds made before that was set up need an uninstall first.) Android asks to allow installs from this source: allow it

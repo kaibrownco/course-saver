@@ -125,7 +125,8 @@ jobs:
         run: |
           APP="$(ls -d build/macos/*.app | head -1)"
           echo "Built: $APP"
-          ditto -c -k --keepParent "$APP" CourseSaver-macos.zip
+          ditto "$APP" "build/macos/Course Saver.app"
+          ditto -c -k --keepParent "build/macos/Course Saver.app" CourseSaver-macos.zip
       - uses: actions/upload-artifact@v4
         with: { name: CourseSaver-macos, path: CourseSaver-macos.zip, retention-days: 7 }
 
