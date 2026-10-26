@@ -10,7 +10,7 @@ on:
       platform:
         description: Which app to build
         type: choice
-        options: [all, android, windows]
+        options: [all, android, windows, macos]
         default: all
 
 # Tests run on every push and pull request. The (slow) app builds only run when asked:
@@ -56,7 +56,7 @@ jobs:
 
   windows:
     needs: [test, plan]
-    if: needs.plan.outputs.build == 'true' && inputs.platform != 'android'
+    if: needs.plan.outputs.build == 'true' && inputs.platform != 'android' && inputs.platform != 'macos'
     runs-on: windows-latest
     env:
       # flet prints unicode status marks; the default Windows console encoding (cp1252) crashes on them
@@ -76,7 +76,7 @@ jobs:
 
   android:
     needs: [test, plan]
-    if: needs.plan.outputs.build == 'true' && inputs.platform != 'windows'
+    if: needs.plan.outputs.build == 'true' && inputs.platform != 'windows' && inputs.platform != 'macos'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,9 +110,28 @@ jobs:
           APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/ | tail -1)apksigner"
           "$APKSIGNER" verify --print-certs build/apk/*.apk | grep -E "DN|SHA-256"
 
+  macos:
+    needs: [test, plan]
+    if: needs.plan.outputs.build == 'true' && inputs.platform != 'android' && inputs.platform != 'windows'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PYTHON_VERSION }}' }
+      - run: pip install "flet-cli==1.0.3"
+      # Apple Silicon only (smaller and faster). For Intel Macs drop --arch to get a universal build.
+      - run: flet build macos --arch arm64 --yes --no-rich-output -v
+      - name: Zip the app (ditto keeps the bundle intact; plain zip can break it)
+        run: |
+          APP="$(ls -d build/macos/*.app | head -1)"
+          echo "Built: $APP"
+          ditto -c -k --keepParent "$APP" CourseSaver-macos.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: CourseSaver-macos, path: CourseSaver-macos.zip, retention-days: 7 }
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, android]
+    needs: [windows, android, macos]
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
